@@ -128,9 +128,27 @@ def carregar_excel():
 # ----------------------------------------------------------------------------
 # Rotas da API
 # ----------------------------------------------------------------------------
+def render_pagina(ordem="asc", nome=""):
+    import json as _json
+    inj = f"<script>window.ORDEM={_json.dumps(ordem)};window.VALIDADOR={_json.dumps(nome)};</script>"
+    return PAGINA_HTML.replace("<!--INJECT-->", inj)
+
+
 @app.route("/")
 def index():
-    return PAGINA_HTML
+    return render_pagina()
+
+
+@app.route("/carlos")
+def rota_carlos():
+    # comeca das imagens em ordem CRESCENTE
+    return render_pagina(ordem="asc", nome="Carlos")
+
+
+@app.route("/renato")
+def rota_renato():
+    # comeca das imagens em ordem DECRESCENTE
+    return render_pagina(ordem="desc", nome="Renato")
 
 
 @app.route("/imagens/<path:nome>")
@@ -159,7 +177,8 @@ def api_lista():
     if status in (PENDENTE, APROVADO, REPROVADO):
         sql += " AND status = ?"
         params.append(status)
-    sql += " ORDER BY CAST(pro_codigo AS INTEGER), pro_codigo"
+    ordem = "DESC" if request.args.get("ordem") == "desc" else "ASC"
+    sql += f" ORDER BY CAST(pro_codigo AS INTEGER) {ordem}, pro_codigo {ordem}"
     rows = db.execute(sql, params).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -231,8 +250,9 @@ PAGINA_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<!--INJECT-->
 <header>
-  <h1>🔍 Validador de Imagens</h1>
+  <h1>🔍 Validador de Imagens <span id="quem" style="color:#38bdf8"></span></h1>
   <div class="stats" id="stats"></div>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <label class="pos">Mostrar:</label>
@@ -280,7 +300,8 @@ async function carregarStats(){
 
 async function carregarLista(){
   const f = document.getElementById('filtro').value;
-  lista = await (await fetch('/api/lista?status='+f)).json();
+  const ordem = window.ORDEM || 'asc';
+  lista = await (await fetch('/api/lista?status='+f+'&ordem='+ordem)).json();
   idx = 0;
   render();
   carregarStats();
@@ -330,6 +351,10 @@ document.addEventListener('keydown', e=>{
   else if(e.key==='Enter'){ ir(1); }
 });
 
+if(window.VALIDADOR){
+  document.getElementById('quem').textContent = '— '+window.VALIDADOR;
+  document.title = 'Validador — '+window.VALIDADOR;
+}
 carregarLista();
 </script>
 </body>
