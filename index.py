@@ -5,7 +5,7 @@ Validador de Imagens de Produtos
 - Le o Excel 'Produtos_comercializavel_S.xlsx' (colunas PRO_CODIGO e PRO_DESCRICAO)
 - Casa cada produto com a imagem em 'imagens/<PRO_CODIGO>.jpg'
 - Abre uma tela web onde voce valida se a imagem BATE ou NAO BATE com a descricao
-- Grava o resultado em 'banco.db' (SQLite)
+- Grava o resultado no PostgreSQL (connection string na variavel DATABASE do .env)
 
 Como usar:
     .venv\\Scripts\\python.exe index.py
@@ -13,7 +13,9 @@ e abra http://127.0.0.1:5000 no navegador.
 """
 
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_from_directory, abort, g
 
 # ----------------------------------------------------------------------------
@@ -22,7 +24,10 @@ from flask import Flask, request, jsonify, send_from_directory, abort, g
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL = os.path.join(BASE_DIR, "Produtos_comercializavel_S.xlsx")
 PASTA_IMAGENS = os.path.join(BASE_DIR, "imagens")
-DB = os.path.join(BASE_DIR, "banco.db")
+SQLITE_ANTIGO = os.path.join(BASE_DIR, "banco.db")  # so para importar dados antigos
+
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+DATABASE = os.environ.get("DATABASE", "").strip()
 
 # Status possiveis
 PENDENTE = "pendente"
@@ -37,8 +42,7 @@ app = Flask(__name__)
 # ----------------------------------------------------------------------------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB)
-        g.db.row_factory = sqlite3.Row
+        g.db = psycopg2.connect(DATABASE)
     return g.db
 
 
@@ -49,9 +53,30 @@ def close_db(exc):
         db.close()
 
 
+def db_query(sql, params=()):
+    """SELECT: retorna lista de dicts."""
+    db = get_db()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def db_execute(sql, params=()):
+    """INSERT/UPDATE: executa e commita."""
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute(sql, params)
+    db.commit()
+
+
+# Ordena numericamente quando o codigo e numero, sem quebrar em codigos com letras
+ORDEM_NUMERICA = "(CASE WHEN pro_codigo ~ '^[0-9]+$' THEN pro_codigo::bigint END)"
+
+
 def init_db():
-    con = sqlite3.connect(DB)
-    con.execute(
+    con = psycopg2.connect(DATABASE)
+    cur = con.cursor()
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS produtos (
             pro_codigo     TEXT PRIMARY KEY,
@@ -60,11 +85,37 @@ def init_db():
             tem_imagem     INTEGER NOT NULL DEFAULT 0,
             status         TEXT NOT NULL DEFAULT 'pendente',
             observacao     TEXT,
+            link           TEXT,            -- preenchido quando o usuario marca NAO BATE
             data_validacao TEXT
         )
         """
     )
+    cur.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS link TEXT")
     con.commit()
+
+    # Importacao unica: se o Postgres esta vazio e existe o banco.db antigo,
+    # traz os dados (status, observacao, link, data) validados no SQLite
+    cur.execute("SELECT COUNT(*) FROM produtos")
+    if cur.fetchone()[0] == 0 and os.path.exists(SQLITE_ANTIGO):
+        import sqlite3
+
+        scon = sqlite3.connect(SQLITE_ANTIGO)
+        scon.row_factory = sqlite3.Row
+        rows = scon.execute(
+            "SELECT pro_codigo, pro_descricao, imagem, tem_imagem, status, observacao, link, data_validacao FROM produtos"
+        ).fetchall()
+        scon.close()
+        for r in rows:
+            cur.execute(
+                """
+                INSERT INTO produtos (pro_codigo, pro_descricao, imagem, tem_imagem, status, observacao, link, data_validacao)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (pro_codigo) DO NOTHING
+                """,
+                tuple(r),
+            )
+        con.commit()
+        print(f"Importados {len(rows)} produtos do banco.db antigo para o PostgreSQL.")
     con.close()
 
 
@@ -91,8 +142,10 @@ def carregar_excel():
     except ValueError:
         raise RuntimeError(f"Cabecalho nao encontrado. Colunas lidas: {header}")
 
-    con = sqlite3.connect(DB)
-    antes = con.execute("SELECT COUNT(*) FROM produtos").fetchone()[0]
+    con = psycopg2.connect(DATABASE)
+    cur = con.cursor()
+    cur.execute("SELECT COUNT(*) FROM produtos")
+    antes = cur.fetchone()[0]
     vistos = set()
     for row in ws.iter_rows(min_row=2, values_only=True):
         cod = row[idx_cod]
@@ -107,19 +160,20 @@ def carregar_excel():
         arquivo = imagens.get(cod)
         tem = 1 if arquivo else 0
         # UPSERT: insere se novo; se existir, atualiza so os campos do Excel e preserva o status validado
-        con.execute(
+        cur.execute(
             """
             INSERT INTO produtos (pro_codigo, pro_descricao, imagem, tem_imagem, status)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(pro_codigo) DO UPDATE SET
-                pro_descricao = excluded.pro_descricao,
-                imagem        = excluded.imagem,
-                tem_imagem    = excluded.tem_imagem
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (pro_codigo) DO UPDATE SET
+                pro_descricao = EXCLUDED.pro_descricao,
+                imagem        = EXCLUDED.imagem,
+                tem_imagem    = EXCLUDED.tem_imagem
             """,
             (cod, desc, arquivo, tem, PENDENTE),
         )
     con.commit()
-    depois = con.execute("SELECT COUNT(*) FROM produtos").fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM produtos")
+    depois = cur.fetchone()[0]
     con.close()
     wb.close()
     return depois - antes
@@ -158,12 +212,11 @@ def servir_imagem(nome):
 
 @app.route("/api/stats")
 def api_stats():
-    db = get_db()
     base = "FROM produtos WHERE tem_imagem = 1"
-    total = db.execute(f"SELECT COUNT(*) c {base}").fetchone()["c"]
-    aprov = db.execute(f"SELECT COUNT(*) c {base} AND status=?", (APROVADO,)).fetchone()["c"]
-    repro = db.execute(f"SELECT COUNT(*) c {base} AND status=?", (REPROVADO,)).fetchone()["c"]
-    pend = db.execute(f"SELECT COUNT(*) c {base} AND status=?", (PENDENTE,)).fetchone()["c"]
+    total = db_query(f"SELECT COUNT(*) c {base}")[0]["c"]
+    aprov = db_query(f"SELECT COUNT(*) c {base} AND status=%s", (APROVADO,))[0]["c"]
+    repro = db_query(f"SELECT COUNT(*) c {base} AND status=%s", (REPROVADO,))[0]["c"]
+    pend = db_query(f"SELECT COUNT(*) c {base} AND status=%s", (PENDENTE,))[0]["c"]
     return jsonify(total=total, aprovado=aprov, reprovado=repro, pendente=pend)
 
 
@@ -171,23 +224,23 @@ def api_stats():
 def api_lista():
     """Lista produtos (com imagem) para navegacao, com filtro opcional por status."""
     status = request.args.get("status", "todos")
-    db = get_db()
-    sql = "SELECT pro_codigo, pro_descricao, imagem, status, observacao FROM produtos WHERE tem_imagem = 1"
+    sql = "SELECT pro_codigo, pro_descricao, imagem, status, observacao, link FROM produtos WHERE tem_imagem = 1"
     params = []
     if status in (PENDENTE, APROVADO, REPROVADO):
-        sql += " AND status = ?"
+        sql += " AND status = %s"
         params.append(status)
     ordem = "DESC" if request.args.get("ordem") == "desc" else "ASC"
-    sql += f" ORDER BY CAST(pro_codigo AS INTEGER) {ordem}, pro_codigo {ordem}"
-    rows = db.execute(sql, params).fetchall()
+    sql += f" ORDER BY {ORDEM_NUMERICA} {ordem}, pro_codigo {ordem}"
+    rows = db_query(sql, params)
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/status")
 def api_status():
-    """Retorna todos os produtos com pro_codigo e status (JSON)."""
-    db = get_db()
-    rows = db.execute("SELECT pro_codigo, status FROM produtos ORDER BY CAST(pro_codigo AS INTEGER), pro_codigo").fetchall()
+    """Retorna todos os produtos com pro_codigo, status e link (JSON)."""
+    rows = db_query(
+        f"SELECT pro_codigo, status, link FROM produtos ORDER BY {ORDEM_NUMERICA}, pro_codigo"
+    )
     return jsonify([dict(r) for r in rows])
 
 
@@ -197,15 +250,18 @@ def api_validar():
     cod = str(data.get("pro_codigo", "")).strip()
     status = data.get("status")
     obs = data.get("observacao")
+    link = data.get("link")
     if status not in (APROVADO, REPROVADO, PENDENTE):
         abort(400, "status invalido")
-    db = get_db()
+    if status != REPROVADO:
+        link = None  # link so faz sentido quando NAO BATE
+    elif link is not None:
+        link = str(link).strip() or None
     from datetime import datetime
-    db.execute(
-        "UPDATE produtos SET status = ?, observacao = ?, data_validacao = ? WHERE pro_codigo = ?",
-        (status, obs, datetime.now().isoformat(timespec="seconds"), cod),
+    db_execute(
+        "UPDATE produtos SET status = %s, observacao = %s, link = %s, data_validacao = %s WHERE pro_codigo = %s",
+        (status, obs, link, datetime.now().isoformat(timespec="seconds"), cod),
     )
-    db.commit()
     return jsonify(ok=True)
 
 
@@ -332,9 +388,16 @@ function ir(d){ idx += d; render(); }
 async function validar(status){
   const p = lista[idx];
   if(!p) return;
+  let link = null;
+  if(status === 'reprovado'){
+    link = prompt('Cole o link da imagem correta (opcional):', p.link || '');
+    if(link === null) return; // cancelou: nao valida
+    link = link.trim() || null;
+  }
   await fetch('/api/validar', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pro_codigo:p.pro_codigo, status})});
+    body: JSON.stringify({pro_codigo:p.pro_codigo, status, link})});
   p.status = status;
+  p.link = link;
   carregarStats();
   // se o item validado nao pertence mais ao filtro atual, ele some da tela na hora
   const f = document.getElementById('filtro').value;
@@ -366,6 +429,12 @@ carregarLista();
 # Inicializacao
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
+    if not DATABASE:
+        raise SystemExit(
+            "ERRO: variavel DATABASE vazia no .env.\n"
+            "Preencha com a connection string do PostgreSQL, ex:\n"
+            "DATABASE=postgresql://usuario:senha@host:5432/nome_do_banco"
+        )
     print("Inicializando banco de dados...")
     init_db()
     print("Carregando produtos do Excel (isso pode levar alguns segundos)...")
