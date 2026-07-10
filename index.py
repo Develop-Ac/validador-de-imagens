@@ -12,11 +12,14 @@ Como usar:
 e abra http://127.0.0.1:5000 no navegador.
 """
 
+import hashlib
 import os
+from functools import wraps
+
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, send_from_directory, abort, g
+from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session, url_for
 
 # ----------------------------------------------------------------------------
 # Configuracao
@@ -29,12 +32,81 @@ SQLITE_ANTIGO = os.path.join(BASE_DIR, "banco.db")  # so para importar dados ant
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATABASE = os.environ.get("DATABASE", "").strip()
 
+# Credenciais: USUARIOS=carlos:senha123,renato:senha456
+_usuarios_raw = os.environ.get("USUARIOS", "carlos:carlos,renato:renato")
+USUARIOS = {}
+for _par in _usuarios_raw.split(","):
+    _par = _par.strip()
+    if ":" in _par:
+        _u, _s = _par.split(":", 1)
+        USUARIOS[_u.strip().lower()] = _s.strip()
+
 # Status possiveis
 PENDENTE = "pendente"
 APROVADO = "aprovado"   # imagem BATE com a descricao
 REPROVADO = "reprovado"  # imagem NAO BATE
 
 app = Flask(__name__)
+# Chave derivada do DATABASE para sessoes persistirem entre reinicializacoes
+app.secret_key = os.environ.get("SECRET_KEY") or hashlib.sha256(DATABASE.encode()).hexdigest()
+
+
+# ----------------------------------------------------------------------------
+# Auth
+# ----------------------------------------------------------------------------
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "usuario" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def _redirect_usuario(usuario):
+    if usuario == "carlos":
+        return redirect(url_for("rota_carlos"))
+    if usuario == "renato":
+        return redirect(url_for("rota_renato"))
+    return redirect(url_for("index"))
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login — Validador de Imagens</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --txt:#e2e8f0; --mut:#94a3b8; --ok:#16a34a; --err:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Segoe UI, sans-serif; background:var(--bg); color:var(--txt); min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .box { background:var(--card); border-radius:16px; padding:36px 32px; width:100%; max-width:360px; box-shadow:0 20px 60px rgba(0,0,0,.4); }
+  h1 { margin:0 0 6px; font-size:22px; }
+  p { margin:0 0 24px; color:var(--mut); font-size:14px; }
+  label { display:block; font-size:13px; color:var(--mut); margin-bottom:6px; }
+  input { width:100%; padding:10px 14px; border-radius:10px; border:1px solid #334155; background:#0f172a; color:var(--txt); font-size:15px; margin-bottom:16px; outline:none; transition:border-color .15s; }
+  input:focus { border-color:#38bdf8; }
+  button[type=submit] { width:100%; padding:13px; border:0; border-radius:10px; background:var(--ok); color:#fff; font-size:16px; font-weight:700; cursor:pointer; }
+  button[type=submit]:hover { opacity:.9; }
+  .erro { background:#450a0a; border:1px solid var(--err); color:#fca5a5; border-radius:8px; padding:10px 14px; font-size:14px; margin-bottom:16px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>&#128269; Validador de Imagens</h1>
+  <p>Entre com suas credenciais para continuar.</p>
+  {erro_html}
+  <form method="post" action="/login">
+    <label>Usu&#225;rio</label>
+    <input name="usuario" type="text" autocomplete="username" autofocus placeholder="seu usu&#225;rio">
+    <label>Senha</label>
+    <input name="senha" type="password" autocomplete="current-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+    <button type="submit">Entrar</button>
+  </form>
+</div>
+</body>
+</html>"""
 
 
 # ----------------------------------------------------------------------------
@@ -180,37 +252,70 @@ def carregar_excel():
 
 
 # ----------------------------------------------------------------------------
-# Rotas da API
+# Rotas de autenticacao
+# ----------------------------------------------------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if "usuario" in session:
+        return _redirect_usuario(session["usuario"])
+    erro = ""
+    if request.method == "POST":
+        usuario = request.form.get("usuario", "").strip().lower()
+        senha = request.form.get("senha", "").strip()
+        if usuario in USUARIOS and USUARIOS[usuario] == senha:
+            session["usuario"] = usuario
+            return _redirect_usuario(usuario)
+        erro = "Usu\u00e1rio ou senha inv\u00e1lidos."
+    erro_html = f'<div class="erro">{erro}</div>' if erro else ""
+    return LOGIN_HTML.replace("{erro_html}", erro_html)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ----------------------------------------------------------------------------
+# Rotas da pagina
 # ----------------------------------------------------------------------------
 def render_pagina(ordem="asc", nome=""):
     import json as _json
-    inj = f"<script>window.ORDEM={_json.dumps(ordem)};window.VALIDADOR={_json.dumps(nome)};</script>"
+    usuario = session.get("usuario", "")
+    inj = (f"<script>window.ORDEM={_json.dumps(ordem)};"
+           f"window.VALIDADOR={_json.dumps(nome)};"
+           f"window.USUARIO_LOGADO={_json.dumps(usuario)};</script>")
     return PAGINA_HTML.replace("<!--INJECT-->", inj)
 
 
 @app.route("/")
+@login_required
 def index():
     return render_pagina()
 
 
 @app.route("/carlos")
+@login_required
 def rota_carlos():
     # comeca das imagens em ordem CRESCENTE
     return render_pagina(ordem="asc", nome="Carlos")
 
 
 @app.route("/renato")
+@login_required
 def rota_renato():
     # comeca das imagens em ordem DECRESCENTE
     return render_pagina(ordem="desc", nome="Renato")
 
 
 @app.route("/imagens/<path:nome>")
+@login_required
 def servir_imagem(nome):
     return send_from_directory(PASTA_IMAGENS, nome)
 
 
 @app.route("/api/stats")
+@login_required
 def api_stats():
     base = "FROM produtos WHERE tem_imagem = 1"
     total = db_query(f"SELECT COUNT(*) c {base}")[0]["c"]
@@ -221,6 +326,7 @@ def api_stats():
 
 
 @app.route("/api/lista")
+@login_required
 def api_lista():
     """Lista produtos (com imagem) para navegacao, com filtro opcional por status."""
     status = request.args.get("status", "todos")
@@ -236,6 +342,7 @@ def api_lista():
 
 
 @app.route("/api/status")
+@login_required
 def api_status():
     """Retorna todos os produtos com pro_codigo, status e link (JSON)."""
     rows = db_query(
@@ -245,6 +352,7 @@ def api_status():
 
 
 @app.route("/api/validar", methods=["POST"])
+@login_required
 def api_validar():
     data = request.get_json(force=True)
     cod = str(data.get("pro_codigo", "")).strip()
@@ -303,6 +411,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   .pos { color:var(--mut); font-size:14px; }
   .dica { text-align:center; color:var(--mut); font-size:12px; margin-top:14px; }
   .vazio { text-align:center; padding:60px 20px; color:var(--mut); }
+  .btn-sair { padding:6px 14px; border-radius:8px; border:1px solid #334155; background:transparent; color:var(--mut); cursor:pointer; font-size:13px; white-space:nowrap; }
+  .btn-sair:hover { border-color:#475569; color:var(--txt); }
 </style>
 </head>
 <body>
@@ -310,7 +420,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
 <header>
   <h1>🔍 Validador de Imagens <span id="quem" style="color:#38bdf8"></span></h1>
   <div class="stats" id="stats"></div>
-  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
     <label class="pos">Mostrar:</label>
     <select id="filtro">
       <option value="pendente">Pendentes</option>
@@ -318,6 +428,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <option value="aprovado">Aprovados (bate)</option>
       <option value="reprovado">Reprovados (nao bate)</option>
     </select>
+    <span id="usuario-logado" style="color:#64748b; font-size:13px;"></span>
+    <button class="btn-sair" id="btn-sair">Sair</button>
   </div>
 </header>
 
@@ -406,6 +518,9 @@ async function validar(status){
 }
 
 document.getElementById('filtro').addEventListener('change', carregarLista);
+document.getElementById('btn-sair').addEventListener('click', ()=>{
+  fetch('/logout', {method:'POST'}).then(()=>{ location.href='/login'; });
+});
 document.addEventListener('keydown', e=>{
   if(e.key==='1' || e.key==='ArrowLeft' && e.shiftKey){ validar('reprovado'); }
   else if(e.key==='2' || e.key==='ArrowRight' && e.shiftKey){ validar('aprovado'); }
@@ -417,6 +532,9 @@ document.addEventListener('keydown', e=>{
 if(window.VALIDADOR){
   document.getElementById('quem').textContent = '— '+window.VALIDADOR;
   document.title = 'Validador — '+window.VALIDADOR;
+}
+if(window.USUARIO_LOGADO){
+  document.getElementById('usuario-logado').textContent = window.USUARIO_LOGADO;
 }
 carregarLista();
 </script>
