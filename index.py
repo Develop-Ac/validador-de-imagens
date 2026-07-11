@@ -398,8 +398,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   .card { background:var(--card); border-radius:16px; padding:20px; box-shadow:0 10px 30px rgba(0,0,0,.3); }
   .codigo { font-size:14px; color:var(--mut); }
   .descricao { font-size:22px; font-weight:700; margin:6px 0 16px; line-height:1.3; }
-  .imgwrap { background:#fff; border-radius:12px; display:flex; align-items:center; justify-content:center; min-height:340px; overflow:hidden; }
-  .imgwrap img { max-width:100%; max-height:460px; object-fit:contain; }
+  .imgwrap { background:#fff; border-radius:12px; display:flex; align-items:center; justify-content:center; height:460px; overflow:hidden; }
+  .imgwrap img { width:100%; height:100%; object-fit:contain; }
   .badge { display:inline-block; margin-top:12px; padding:4px 12px; border-radius:999px; font-size:13px; font-weight:700; }
   .badge.ok{background:var(--ok)} .badge.no{background:var(--no)} .badge.pe{background:#475569}
   .acoes { display:flex; gap:12px; margin-top:18px; }
@@ -413,6 +413,19 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   .vazio { text-align:center; padding:60px 20px; color:var(--mut); }
   .btn-sair { padding:6px 14px; border-radius:8px; border:1px solid #334155; background:transparent; color:var(--mut); cursor:pointer; font-size:13px; white-space:nowrap; }
   .btn-sair:hover { border-color:#475569; color:var(--txt); }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:20; padding:16px; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--card); border-radius:16px; padding:24px; width:100%; max-width:420px; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .modal h3 { margin:0 0 16px; font-size:18px; }
+  .opcoes { display:flex; flex-direction:column; gap:10px; }
+  .opcao { padding:14px 16px; border-radius:10px; border:1px solid #475569; background:var(--bg); color:var(--txt); cursor:pointer; text-align:left; font-size:15px; }
+  .opcao:hover { border-color:#64748b; }
+  .opcao.sel { border-color:var(--no); background:#3b1518; }
+  .modal input[type=text] { width:100%; margin-top:12px; padding:12px; border-radius:10px; border:1px solid #475569; background:var(--bg); color:var(--txt); font-size:15px; }
+  .modal-acoes { display:flex; gap:10px; margin-top:20px; }
+  .modal-acoes button { flex:1; padding:12px; border:0; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; }
+  .btn-cancelar { background:#334155; color:var(--txt); }
+  .btn-confirmar { background:var(--no); color:#fff; }
 </style>
 </head>
 <body>
@@ -448,10 +461,27 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <span class="pos" id="pos"></span>
       <button id="next" onclick="ir(1)">Proximo →</button>
     </div>
-    <div class="dica">Atalhos: <b>1</b> ou <b>←seta esq</b> = nao bate · <b>2</b> ou <b>→seta dir</b> = bate · <b>Enter</b> = proximo</div>
+    <div class="dica">Atalhos: <b>Enter</b> = bate · <b>Esc</b> = nao bate · <b>→seta dir</b> = proximo · <b>←seta esq</b> = anterior</div>
   </div>
   <div class="vazio" id="vazio" style="display:none">Nenhum produto neste filtro. 🎉</div>
 </main>
+
+<div class="modal-bg" id="modal-bg">
+  <div class="modal">
+    <h3>Por que nao bate?</h3>
+    <div class="opcoes" id="opcoes">
+      <button type="button" class="opcao" data-val="Uso consumo">Uso consumo</button>
+      <button type="button" class="opcao" data-val="Possui logo marca">Possui logo marca</button>
+      <button type="button" class="opcao" data-val="Outro">Outro</button>
+    </div>
+    <input type="text" id="obs-outro" placeholder="Digite o motivo..." style="display:none">
+    <input type="text" id="obs-link" placeholder="Link da imagem correta (opcional)">
+    <div class="modal-acoes">
+      <button type="button" class="btn-cancelar" id="modal-cancelar">Cancelar</button>
+      <button type="button" class="btn-confirmar" id="modal-confirmar">Confirmar</button>
+    </div>
+  </div>
+</div>
 
 <script>
 let lista = [];
@@ -497,19 +527,65 @@ function render(){
 
 function ir(d){ idx += d; render(); }
 
+let modalResolve = null;
+let obsSelecionada = null;
+
+function abrirModal(p){
+  return new Promise(resolve=>{
+    modalResolve = resolve;
+    obsSelecionada = null;
+    document.querySelectorAll('.opcao').forEach(b=>b.classList.remove('sel'));
+    const outro = document.getElementById('obs-outro');
+    outro.style.display='none'; outro.value='';
+    document.getElementById('obs-link').value = p.link || '';
+    document.getElementById('modal-bg').classList.add('show');
+  });
+}
+
+function fecharModal(result){
+  document.getElementById('modal-bg').classList.remove('show');
+  const r = modalResolve; modalResolve = null;
+  if(r) r(result);
+}
+
+document.getElementById('opcoes').addEventListener('click', e=>{
+  const b = e.target.closest('.opcao');
+  if(!b) return;
+  document.querySelectorAll('.opcao').forEach(x=>x.classList.remove('sel'));
+  b.classList.add('sel');
+  obsSelecionada = b.dataset.val;
+  const outro = document.getElementById('obs-outro');
+  if(obsSelecionada === 'Outro'){ outro.style.display='block'; outro.focus(); }
+  else { outro.style.display='none'; }
+});
+
+document.getElementById('modal-cancelar').addEventListener('click', ()=> fecharModal(null));
+document.getElementById('modal-confirmar').addEventListener('click', ()=>{
+  if(!obsSelecionada){ alert('Escolha um motivo.'); return; }
+  let obs = obsSelecionada;
+  if(obsSelecionada === 'Outro'){
+    obs = document.getElementById('obs-outro').value.trim();
+    if(!obs){ alert('Digite o motivo.'); return; }
+  }
+  const link = document.getElementById('obs-link').value.trim() || null;
+  fecharModal({obs, link});
+});
+
 async function validar(status){
   const p = lista[idx];
   if(!p) return;
-  let link = null;
+  let link = null, obs = null;
   if(status === 'reprovado'){
-    link = prompt('Cole o link da imagem correta (opcional):', p.link || '');
-    if(link === null) return; // cancelou: nao valida
-    link = link.trim() || null;
+    const res = await abrirModal(p);
+    if(res === null) return; // cancelou: nao valida
+    obs = res.obs;
+    link = res.link;
   }
   await fetch('/api/validar', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pro_codigo:p.pro_codigo, status, link})});
+    body: JSON.stringify({pro_codigo:p.pro_codigo, status, link, observacao:obs})});
   p.status = status;
   p.link = link;
+  p.observacao = obs;
   carregarStats();
   // se o item validado nao pertence mais ao filtro atual, ele some da tela na hora
   const f = document.getElementById('filtro').value;
@@ -522,11 +598,15 @@ document.getElementById('btn-sair').addEventListener('click', ()=>{
   fetch('/logout', {method:'POST'}).then(()=>{ location.href='/login'; });
 });
 document.addEventListener('keydown', e=>{
-  if(e.key==='1' || e.key==='ArrowLeft' && e.shiftKey){ validar('reprovado'); }
-  else if(e.key==='2' || e.key==='ArrowRight' && e.shiftKey){ validar('aprovado'); }
-  else if(e.key==='ArrowLeft'){ ir(-1); }
+  if(document.getElementById('modal-bg').classList.contains('show')){
+    if(e.key==='Escape'){ fecharModal(null); }
+    else if(e.key==='Enter'){ document.getElementById('modal-confirmar').click(); }
+    return;
+  }
+  if(e.key==='Enter'){ validar('aprovado'); }
+  else if(e.key==='Escape'){ validar('reprovado'); }
   else if(e.key==='ArrowRight'){ ir(1); }
-  else if(e.key==='Enter'){ ir(1); }
+  else if(e.key==='ArrowLeft'){ ir(-1); }
 });
 
 if(window.VALIDADOR){
