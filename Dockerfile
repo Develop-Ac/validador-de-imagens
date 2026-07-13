@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o codigo e os dados do projeto
-COPY index.py .
+COPY app.py .
 COPY Produtos_comercializavel_S.xlsx .
 COPY imagens/ ./imagens/
 
@@ -17,4 +17,4 @@ EXPOSE 5000
 ENV HOST=0.0.0.0
 ENV PORT=5000
 
-CMD ["python", "index.py"]
+CMD ["python", "app.py"]

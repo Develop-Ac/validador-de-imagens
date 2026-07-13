@@ -314,6 +314,30 @@ def servir_imagem(nome):
     return send_from_directory(PASTA_IMAGENS, nome)
 
 
+@app.route("/imagem/<path:nome>")
+@login_required
+def baixar_imagem(nome):
+    # gera o download da imagem (attachment)
+    return send_from_directory(PASTA_IMAGENS, os.path.basename(nome), as_attachment=True)
+
+
+@app.route("/api/upload", methods=["POST"])
+@login_required
+def api_upload():
+    """Recebe uma imagem e substitui o arquivo na pasta 'imagens' com o mesmo nome do produto."""
+    cod = str(request.form.get("pro_codigo", "")).strip()
+    arquivo = request.files.get("imagem")
+    if not cod or arquivo is None or arquivo.filename == "":
+        abort(400, "faltando codigo ou arquivo")
+    rows = db_query("SELECT imagem FROM produtos WHERE pro_codigo = %s", (cod,))
+    if not rows or not rows[0]["imagem"]:
+        abort(404, "produto sem imagem")
+    nome = os.path.basename(rows[0]["imagem"])  # mantem o mesmo nome; basename evita path traversal
+    arquivo.save(os.path.join(PASTA_IMAGENS, nome))
+    db_execute("UPDATE produtos SET nova_imagem = TRUE WHERE pro_codigo = %s", (cod,))
+    return jsonify(ok=True, imagem=nome)
+
+
 @app.route("/api/stats")
 @login_required
 def api_stats():
@@ -426,10 +450,21 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   .opcao:hover { border-color:#64748b; }
   .opcao.sel { border-color:var(--no); background:#3b1518; }
   .modal input[type=text] { width:100%; margin-top:12px; padding:12px; border-radius:10px; border:1px solid #475569; background:var(--bg); color:var(--txt); font-size:15px; }
+  .obs-file-label { display:block; margin-top:14px; font-size:13px; color:var(--mut); }
+  .obs-file-label input { display:block; margin-top:6px; color:var(--txt); font-size:13px; }
   .modal-acoes { display:flex; gap:10px; margin-top:20px; }
   .modal-acoes button { flex:1; padding:12px; border:0; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; }
   .btn-cancelar { background:#334155; color:var(--txt); }
   .btn-confirmar { background:var(--no); color:#fff; }
+  .btn-recortar { width:100%; margin-top:12px; padding:12px; border-radius:10px; border:1px solid #475569; background:var(--bg); color:var(--txt); cursor:pointer; font-size:14px; }
+  .btn-recortar:hover { border-color:#64748b; }
+  .crop-status { display:block; margin-top:8px; font-size:13px; color:#38bdf8; }
+  #crop-bg { z-index:30; }
+  #crop-bg .modal { max-width:680px; text-align:center; }
+  .crop-area { position:relative; display:inline-block; max-width:100%; line-height:0; cursor:crosshair; }
+  .crop-area img { max-width:100%; max-height:60vh; display:block; }
+  .crop-sel { position:absolute; border:2px dashed #38bdf8; background:rgba(56,189,248,.18); display:none; pointer-events:none; }
+  .crop-dica { color:var(--mut); font-size:13px; margin:10px 0 0; }
 </style>
 </head>
 <body>
@@ -484,9 +519,29 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     </div>
     <input type="text" id="obs-outro" placeholder="Digite o motivo..." style="display:none">
     <input type="text" id="obs-link" placeholder="Link da imagem correta (opcional)">
+    <label class="obs-file-label">Substituir imagem (opcional):
+      <input type="file" id="obs-file" accept="image/*">
+    </label>
+    <button type="button" class="btn-recortar" id="btn-recortar">✂ Recortar imagem atual</button>
+    <span class="crop-status" id="crop-status"></span>
     <div class="modal-acoes">
       <button type="button" class="btn-cancelar" id="modal-cancelar">Cancelar</button>
       <button type="button" class="btn-confirmar" id="modal-confirmar">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="crop-bg">
+  <div class="modal">
+    <h3>Recortar imagem</h3>
+    <div class="crop-area" id="crop-area">
+      <img id="crop-img" alt="imagem para recortar">
+      <div class="crop-sel" id="crop-sel"></div>
+    </div>
+    <p class="crop-dica">Arraste sobre a imagem para selecionar a area que sera mantida.</p>
+    <div class="modal-acoes">
+      <button type="button" class="btn-cancelar" id="crop-cancelar">Cancelar</button>
+      <button type="button" class="btn-confirmar" id="crop-ok">Recortar</button>
     </div>
   </div>
 </div>
@@ -523,7 +578,9 @@ function render(){
   const p = lista[idx];
   document.getElementById('cod').textContent = p.pro_codigo;
   document.getElementById('desc').textContent = p.pro_descricao || '(sem descricao)';
-  document.getElementById('img').src = '/imagens/' + encodeURIComponent(p.imagem);
+  let imgSrc = '/imagens/' + encodeURIComponent(p.imagem);
+  if(p._bust) imgSrc += '?v=' + p._bust;
+  document.getElementById('img').src = imgSrc;
   const badge = document.getElementById('badge');
   const map = {aprovado:['ok','✓ BATE'], reprovado:['no','✗ NAO BATE'], pendente:['pe','• Pendente']};
   const [cls,txt] = map[p.status] || map.pendente;
@@ -549,15 +606,21 @@ function pularPara(){
 
 let modalResolve = null;
 let obsSelecionada = null;
+let modalProduto = null;
+let arquivoRecorte = null; // Blob gerado pelo recorte
 
 function abrirModal(p){
   return new Promise(resolve=>{
     modalResolve = resolve;
     obsSelecionada = null;
+    modalProduto = p;
+    arquivoRecorte = null;
+    document.getElementById('crop-status').textContent = '';
     document.querySelectorAll('.opcao').forEach(b=>b.classList.remove('sel'));
     const outro = document.getElementById('obs-outro');
     outro.style.display='none'; outro.value='';
     document.getElementById('obs-link').value = p.link || '';
+    document.getElementById('obs-file').value = '';
     document.getElementById('modal-bg').classList.add('show');
   });
 }
@@ -588,7 +651,77 @@ document.getElementById('modal-confirmar').addEventListener('click', ()=>{
     if(!obs){ alert('Digite o motivo.'); return; }
   }
   const link = document.getElementById('obs-link').value.trim() || null;
-  fecharModal({obs, link});
+  // o recorte tem prioridade sobre o arquivo escolhido manualmente
+  const file = arquivoRecorte || document.getElementById('obs-file').files[0] || null;
+  fecharModal({obs, link, file});
+});
+
+// ---- Recorte de imagem ----
+const cropImgEl = document.getElementById('crop-img');
+const cropSel = document.getElementById('crop-sel');
+const cropArea = document.getElementById('crop-area');
+let cropStart = null;   // ponto inicial do arrasto (px na imagem exibida)
+let cropRect = null;    // {x,y,w,h} em px na imagem exibida
+
+function abrirCrop(p){
+  cropRect = null;
+  cropSel.style.display = 'none';
+  let src = '/imagens/' + encodeURIComponent(p.imagem);
+  if(p._bust) src += '?v=' + p._bust;
+  cropImgEl.src = src;
+  document.getElementById('crop-bg').classList.add('show');
+}
+function fecharCrop(){ document.getElementById('crop-bg').classList.remove('show'); cropStart = null; }
+
+function posSel(x,y,w,h){
+  cropSel.style.left = x+'px'; cropSel.style.top = y+'px';
+  cropSel.style.width = w+'px'; cropSel.style.height = h+'px';
+}
+
+cropArea.addEventListener('mousedown', e=>{
+  const r = cropImgEl.getBoundingClientRect();
+  cropStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+  cropRect = null;
+  cropSel.style.display = 'block';
+  posSel(cropStart.x, cropStart.y, 0, 0);
+  e.preventDefault();
+});
+window.addEventListener('mousemove', e=>{
+  if(!cropStart) return;
+  const r = cropImgEl.getBoundingClientRect();
+  const cx = Math.max(0, Math.min(e.clientX - r.left, r.width));
+  const cy = Math.max(0, Math.min(e.clientY - r.top, r.height));
+  const x = Math.min(cropStart.x, cx), y = Math.min(cropStart.y, cy);
+  const w = Math.abs(cx - cropStart.x), h = Math.abs(cy - cropStart.y);
+  cropRect = {x, y, w, h};
+  posSel(x, y, w, h);
+});
+window.addEventListener('mouseup', ()=>{ cropStart = null; });
+
+document.getElementById('btn-recortar').addEventListener('click', ()=>{
+  if(modalProduto) abrirCrop(modalProduto);
+});
+document.getElementById('crop-cancelar').addEventListener('click', fecharCrop);
+document.getElementById('crop-ok').addEventListener('click', ()=>{
+  if(!cropRect || cropRect.w < 5 || cropRect.h < 5){
+    alert('Arraste para selecionar uma area maior.');
+    return;
+  }
+  const dispW = cropImgEl.clientWidth, dispH = cropImgEl.clientHeight;
+  const scaleX = cropImgEl.naturalWidth / dispW;
+  const scaleY = cropImgEl.naturalHeight / dispH;
+  const sx = cropRect.x * scaleX, sy = cropRect.y * scaleY;
+  const sw = cropRect.w * scaleX, sh = cropRect.h * scaleY;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(sw); canvas.height = Math.round(sh);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(cropImgEl, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(blob=>{
+    arquivoRecorte = blob;
+    document.getElementById('crop-status').textContent = '✂ Imagem recortada — sera enviada ao confirmar.';
+    document.getElementById('obs-file').value = '';
+    fecharCrop();
+  }, 'image/jpeg', 0.92);
 });
 
 async function validar(status){
@@ -600,6 +733,14 @@ async function validar(status){
     if(res === null) return; // cancelou: nao valida
     obs = res.obs;
     link = res.link;
+    if(res.file){
+      const fd = new FormData();
+      fd.append('pro_codigo', p.pro_codigo);
+      fd.append('imagem', res.file);
+      const up = await fetch('/api/upload', {method:'POST', body:fd});
+      if(!up.ok){ alert('Falha ao enviar a imagem.'); return; }
+      p._bust = Date.now(); // forca recarregar a imagem trocada
+    }
   }
   await fetch('/api/validar', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({pro_codigo:p.pro_codigo, status, link, observacao:obs})});
@@ -618,6 +759,10 @@ document.getElementById('btn-sair').addEventListener('click', ()=>{
   fetch('/logout', {method:'POST'}).then(()=>{ location.href='/login'; });
 });
 document.addEventListener('keydown', e=>{
+  if(document.getElementById('crop-bg').classList.contains('show')){
+    if(e.key==='Escape'){ fecharCrop(); }
+    return;
+  }
   if(document.getElementById('modal-bg').classList.contains('show')){
     if(e.key==='Escape'){ fecharModal(null); }
     else if(e.key==='Enter'){ document.getElementById('modal-confirmar').click(); }
