@@ -409,6 +409,10 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   .nav button { padding:10px 16px; border-radius:10px; border:1px solid #475569; background:var(--card); color:var(--txt); cursor:pointer; }
   .nav button:disabled { opacity:.4; cursor:default; }
   .pos { color:var(--mut); font-size:14px; }
+  .pular { display:flex; justify-content:center; align-items:center; gap:8px; margin-top:12px; color:var(--mut); font-size:14px; }
+  .pular input { width:90px; padding:8px 10px; border-radius:8px; border:1px solid #475569; background:var(--bg); color:var(--txt); font-size:14px; }
+  .pular button { padding:8px 16px; border-radius:8px; border:1px solid #475569; background:var(--card); color:var(--txt); cursor:pointer; }
+  .pular button:hover { border-color:#64748b; }
   .dica { text-align:center; color:var(--mut); font-size:12px; margin-top:14px; }
   .vazio { text-align:center; padding:60px 20px; color:var(--mut); }
   .btn-sair { padding:6px 14px; border-radius:8px; border:1px solid #334155; background:transparent; color:var(--mut); cursor:pointer; font-size:13px; white-space:nowrap; }
@@ -460,6 +464,10 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <button id="prev" onclick="ir(-1)">← Anterior</button>
       <span class="pos" id="pos"></span>
       <button id="next" onclick="ir(1)">Proximo →</button>
+    </div>
+    <div class="pular">
+      Ir para: <input type="number" id="pular-num" min="1" placeholder="nº" onkeydown="if(event.key==='Enter'){event.preventDefault();pularPara();}">
+      <button id="pular-btn" onclick="pularPara()">Ir</button>
     </div>
     <div class="dica">Atalhos: <b>Enter</b> = bate · <b>Esc</b> = nao bate · <b>→seta dir</b> = proximo · <b>←seta esq</b> = anterior</div>
   </div>
@@ -526,6 +534,18 @@ function render(){
 }
 
 function ir(d){ idx += d; render(); }
+
+function pularPara(){
+  const inp = document.getElementById('pular-num');
+  const n = parseInt(inp.value, 10);
+  if(!n || n < 1 || n > lista.length){
+    alert('Digite um numero entre 1 e ' + lista.length + '.');
+    return;
+  }
+  idx = n - 1;
+  inp.value = '';
+  render();
+}
 
 let modalResolve = null;
 let obsSelecionada = null;
@@ -603,6 +623,8 @@ document.addEventListener('keydown', e=>{
     else if(e.key==='Enter'){ document.getElementById('modal-confirmar').click(); }
     return;
   }
+  const t = e.target.tagName;
+  if(t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA'){ return; }
   if(e.key==='Enter'){ validar('aprovado'); }
   else if(e.key==='Escape'){ validar('reprovado'); }
   else if(e.key==='ArrowRight'){ ir(1); }
